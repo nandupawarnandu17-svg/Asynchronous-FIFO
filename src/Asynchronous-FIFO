@@ -1,0 +1,111 @@
+module async_fifo #(
+    parameter int DATA_WIDTH = 8,
+    parameter int ADDR_WIDTH = 4
+)(
+    input  logic wr_clk,
+    input  logic rd_clk,
+    input  logic rst_n,
+    input  logic wr_en,
+    input  logic rd_en,
+    input  logic [DATA_WIDTH-1:0] data_in,
+    output logic [DATA_WIDTH-1:0] data_out,
+    output logic full,
+    output logic empty
+);
+    localparam int DEPTH = 1 << ADDR_WIDTH;
+    localparam int PTR_WIDTH = ADDR_WIDTH + 1;
+
+    // FIFO memory
+    logic [DATA_WIDTH-1:0] mem [0:DEPTH-1];
+
+    // Binary pointers
+    logic [PTR_WIDTH-1:0] wbin, rbin;
+    // Gray-code pointers
+    logic [PTR_WIDTH-1:0] wgray, rgray;
+    // Synchronized Gray-code pointers
+    logic [PTR_WIDTH-1:0] rgray_wsync1, rgray_wsync2;
+    logic [PTR_WIDTH-1:0] wgray_rsync1, wgray_rsync2;
+    // Next pointer values
+    logic [PTR_WIDTH-1:0] wbin_next, rbin_next;
+    logic [PTR_WIDTH-1:0] wgray_next, rgray_next;
+
+    // Binary to Gray conversion
+    function automatic logic [PTR_WIDTH-1:0] bin2gray(
+        input logic [PTR_WIDTH-1:0] bin
+    );
+        bin2gray = (bin >> 1) ^ bin;
+    endfunction
+
+    // Calculate next write pointer
+    assign wbin_next = wbin + ((wr_en && !full) ? 1'b1 : 1'b0);
+    assign wgray_next = bin2gray(wbin_next);
+
+    // Calculate next read pointer
+    assign rbin_next = rbin + ((rd_en && !empty) ? 1'b1 : 1'b0);
+    assign rgray_next = bin2gray(rbin_next);
+
+    // Write clock domain
+    always_ff @(posedge wr_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wbin <= '0;
+            wgray <= '0;
+            full <= 1'b0;
+        end
+        else begin
+            if (wr_en && !full)
+                mem[wbin[ADDR_WIDTH-1:0]] <= data_in;
+            wbin <= wbin_next;
+            wgray <= wgray_next;
+            // Full detection
+            full <= (
+                wgray_next ==
+                {
+                    ~rgray_wsync2[PTR_WIDTH-1:PTR_WIDTH-2],
+                    rgray_wsync2[PTR_WIDTH-3:0]
+                }
+            );
+        end
+    end
+
+    // Read clock domain
+    always_ff @(posedge rd_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rbin <= '0;
+            rgray <= '0;
+            data_out <= '0;
+            empty <= 1'b1;
+        end
+        else begin
+            if (rd_en && !empty)
+                data_out <= mem[rbin[ADDR_WIDTH-1:0]];
+            rbin <= rbin_next;
+            rgray <= rgray_next;
+            // Empty detection
+            empty <= (rgray_next == wgray_rsync2);
+        end
+    end
+
+    // Synchronize read pointer into write clock domain
+    always_ff @(posedge wr_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rgray_wsync1 <= '0;
+            rgray_wsync2 <= '0;
+        end
+        else begin
+            rgray_wsync1 <= rgray;
+            rgray_wsync2 <= rgray_wsync1;
+        end
+    end
+
+    // Synchronize write pointer into read clock domain
+    always_ff @(posedge rd_clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wgray_rsync1 <= '0;
+            wgray_rsync2 <= '0;
+        end
+        else begin
+            wgray_rsync1 <= wgray;
+            wgray_rsync2 <= wgray_rsync1;
+        end
+    end
+endmodule
